@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Simple TPS Game</title>
+    <script src="https://cdn.babylonjs.com/babylon.js"></script>
+    <style>
+      body { margin: 0; overflow: hidden; }
+      canvas { width: 100%; height: 100%; display: block; }
+      #ui { position: absolute; top: 10px; left: 10px; color: white; font-family: Arial; }
+      #crosshair { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
+                   color: white; font-size: 20px; pointer-events: none; }
+    </style>
+  </head>
+  <body>
+    <canvas id="renderCanvas"></canvas>
+    <div id="ui">
+      <div>Score: <span id="score">0</span></div>
+      <div>Health: <span id="health">100</span></div>
+      <div>Mode: <span id="mode">Normal</span></div>
+    </div>
+    <div id="crosshair">+</div>
+
+    <script>
+      const canvas = document.getElementById("renderCanvas");
+      const engine = new BABYLON.Engine(canvas, true);
+      let scene, camera, player;
+      let enemies = [];
+      let bullets = [];
+      let score = 0;
+      let health = 100;
+
+      // 게임 상태
+      const gameState = {
+        keys: {},
+        mouseX: 0,
+        mouseY: 0,
+        sniperMode: false
+      };
+
+      function createScene() {
+        scene = new BABYLON.Scene(engine);
+        scene.gravity = new BABYLON.Vector3(0, -0.5, 0);
+        scene.collisionsEnabled = true;
+
+        // 플레이어 캐릭터 생성 (사이즈 절반으로 축소)
+        player = BABYLON.MeshBuilder.CreateBox("player", {width: 0.5, height: 1, depth: 0.5}, scene);
+        player.position = new BABYLON.Vector3(0, 0.5, 0);
+        const playerMaterial = new BABYLON.StandardMaterial("playerMat", scene);
+        playerMaterial.diffuseColor = new BABYLON.Color3(0, 0, 1);
+        player.material = playerMaterial;
+        player.checkCollisions = true;
+        player.ellipsoid = new BABYLON.Vector3(0.25, 0.5, 0.25);
+
+        // TPS 카메라 설정 (ArcRotateCamera 사용) - 수정
+        camera = new BABYLON.ArcRotateCamera("camera", -Math.PI/2, Math.PI/2.5, 5, player.position, scene);
+        camera.attachControl(canvas, true);
+        camera.lowerRadiusLimit = 3;
+        camera.upperRadiusLimit = 15;
+        camera.lowerBetaLimit = 0.1;
+        camera.upperBetaLimit = Math.PI/2;
+        
+        // 카메라 감도 조정 (기본값으로 변경)
+        camera.angularSensibilityX = 1000;
+        camera.angularSensibilityY = 1000;
+        camera.panningSensibility = 50;
+        camera.wheelPrecision = 50;
+
+        // 조명
+        const light = new BABYLON.HemisphericLight("light", new BABYLON.Vector3(0, 1, 0), scene);
+        light.intensity = 0.7;
+
+        // 바닥
+        const ground = BABYLON.MeshBuilder.CreateGround("ground", {width: 50, height: 50}, scene);
+        const groundMaterial = new BABYLON.StandardMaterial("groundMat", scene);
+        groundMaterial.diffuseColor = new BABYLON.Color3(0.3, 0.3, 0.3);
+        ground.material = groundMaterial;
+        ground.checkCollisions = true;
+
+        // 벽 생성
+        createWalls();
+        
+        // 적 스폰
+        spawnEnemies();
+
+        return scene;
+      }
+
+      function createWalls() {
+        // 외벽 생성
+        const wallHeight = 4;
+        const wallPositions = [
+          {pos: new BABYLON.Vector3(0, wallHeight/2, 25), size: {width: 50, height: wallHeight, depth: 1}},
+          {pos: new BABYLON.Vector3(0, wallHeight/2, -25), size: {width: 50, height: wallHeight, depth: 1}},
+          {pos: new BABYLON.Vector3(25, wallHeight/2, 0), size: {width: 1, height: wallHeight, depth: 50}},
+          {pos: new BABYLON.Vector3(-25, wallHeight/2, 0), size: {width: 1, height: wallHeight, depth: 50}}
+        ];
+
+        wallPositions.forEach((wall, index) => {
+          const wallMesh = BABYLON.MeshBuilder.CreateBox(`wall${index}`, wall.size, scene);
+          wallMesh.position = wall.pos;
+          const wallMaterial = new BABYLON.StandardMaterial(`wallMat${index}`, scene);
+          wallMaterial.diffuseColor = new BABYLON.Color3(0.5, 0.5, 0.5);
+          wallMesh.material = wallMaterial;
+          wallMesh.checkCollisions = true;
+        });
+
+        // 내부 장애물
+        for(let i = 0; i < 5; i++) {
+          const box = BABYLON.MeshBuilder.CreateBox(`obstacle${i}`, {width: 2, height: 2, depth: 2}, scene);
+          box.position = new BABYLON.Vector3(
+            Math.random() * 40 - 20,
+            1,
+            Math.random() * 40 - 20
+          );
+          const boxMaterial = new BABYLON.StandardMaterial(`obstacleMat${i}`, scene);
+          boxMaterial.diffuseColor = new BABYLON.Color3(0.6, 0.3, 0.1);
+          box.material = boxMaterial;
+          box.checkCollisions = true;
+        }
+      }
+
+      function spawnEnemies() {
+        for(let i = 0; i < 8; i++) {
+          const enemy = BABYLON.MeshBuilder.CreateBox(`enemy${i}`, {width: 1, height: 2, depth: 1}, scene);
+          enemy.position = new BABYLON.Vector3(
+            Math.random() * 40 - 20,
+            1,
+            Math.random() * 40 - 20
+          );
+          
+          const enemyMaterial = new BABYLON.StandardMaterial(`enemyMat${i}`, scene);
+          enemyMaterial.diffuseColor = new BABYLON.Color3(1, 0, 0);
+          enemy.material = enemyMaterial;
+          
+          enemy.health = 100;
+          enemy.speed = 0.02;
+          enemies.push(enemy);
+        }
+      }
+
+      function shoot(isSniper = false) {
+        const bullet = BABYLON.MeshBuilder.CreateSphere("bullet", {diameter: isSniper ? 0.05 : 0.1}, scene);
+        
+        // 플레이어 바로 위에서 총알 발사
+        bullet.position = player.position.clone();
+        bullet.position.y += 0.7; // 플레이어 위쪽에서 발사
+        
+        const bulletMaterial = new BABYLON.StandardMaterial("bulletMat", scene);
+        bulletMaterial.diffuseColor = isSniper ? new BABYLON.Color3(0, 1, 1) : new BABYLON.Color3(1, 1, 0);
+        bullet.material = bulletMaterial;
+
+        // 카메라가 바라보는 방향으로 총알 발사
+        const cameraDirection = camera.getTarget().subtract(camera.position).normalize();
+        bullet.direction = cameraDirection;
+        bullet.speed = isSniper ? 1.0 : 0.5; // 저격총은 더 빠름
+        bullet.life = isSniper ? 200 : 100; // 저격총은 더 긴 사거리
+        bullet.damage = isSniper ? 100 : 50; // 저격총은 더 강함
+        bullet.isSniper = isSniper;
+        
+        // 중력 영향 제거 - 물리 효과 비활성화
+        bullet.physicsImpostor = null;
+
+        bullets.push(bullet);
+      }
+
+      // 십자선을 캐릭터 바로 위에 고정
+      function updateCrosshair() {
+        const crosshair = document.getElementById('crosshair');
+        
+        // 플레이어 위쪽 위치 계산 (머리 위)
+        const playerHeadPos = player.position.add(new BABYLON.Vector3(0, 0.7, 0));
+        
+        // 플레이어 머리 위치를 화면 좌표로 변환
+        const playerScreenPos = BABYLON.Vector3.Project(
+          playerHeadPos,
+          BABYLON.Matrix.Identity(),
+          scene.getTransformMatrix(),
+          camera.viewport.toGlobal(engine.getRenderWidth(), engine.getRenderHeight())
+        );
+        
+        // 십자선을 플레이어 머리 위치로 고정
+        crosshair.style.left = playerScreenPos.x + 'px';
+        crosshair.style.top = playerScreenPos.y + 'px';
+        crosshair.style.transform = 'translate(-50%, -50%)';
+        
+        // 저격모드일 때 십자선 색상 변경
+        if(gameState.sniperMode) {
+          crosshair.style.color = 'red';
+          crosshair.style.fontSize = '30px';
+          crosshair.innerHTML = '⊕';
+        } else {
+          crosshair.style.color = 'white';
+          crosshair.style.fontSize = '20px';
+          crosshair.innerHTML = '+';
+        }
+        
+        // 모드 표시 업데이트
+        document.getElementById('mode').textContent = gameState.sniperMode ? 'Sniper' : 'Normal';
+        document.getElementById('mode').style.color = gameState.sniperMode ? 'red' : 'white';
+      }
+
+      function updateBullets() {
+        bullets = bullets.filter(bullet => {
+          // 총알 이동 (중력 영향 없음)
+          bullet.position.addInPlace(bullet.direction.scale(bullet.speed));
+          bullet.life--;
+
+          // 적과의 충돌 검사
+          enemies.forEach((enemy, enemyIndex) => {
+            if(enemy && BABYLON.Vector3.Distance(bullet.position, enemy.position) < 1) {
+              enemy.health -= bullet.damage;
+              if(enemy.health <= 0) {
+                enemy.dispose();
+                enemies.splice(enemyIndex, 1);
+                score += bullet.isSniper ? 20 : 10; // 저격총은 더 많은 점수
+                document.getElementById('score').textContent = score;
+              }
+              bullet.dispose();
+              bullet.life = 0;
+            }
+          });
+
+          // 벽과의 충돌 검사 (옵션)
+          if(bullet.position.y < 0 || Math.abs(bullet.position.x) > 25 || Math.abs(bullet.position.z) > 25) {
+            bullet.dispose();
+            bullet.life = 0;
+          }
+
+          if(bullet.life <= 0) {
+            bullet.dispose();
+            return false;
+          }
+          return true;
+        });
+      }
+
+      function updateEnemies() {
+        enemies.forEach(enemy => {
+          if(enemy) {
+            // 플레이어를 향해 이동
+            const direction = player.position.subtract(enemy.position);
+            direction.y = 0;
+            direction.normalize();
+            enemy.position.addInPlace(direction.scale(enemy.speed));
+
+            // 플레이어와의 거리 체크
+            if(BABYLON.Vector3.Distance(player.position, enemy.position) < 2) {
+              health -= 1;
+              document.getElementById('health').textContent = health;
+              if(health <= 0) {
+                alert('Game Over! Score: ' + score);
+                location.reload();
+              }
+            }
+          }
+        });
+      }
+
+      function updatePlayer() {
+        const speed = 0.1;
+        let moved = false;
+
+        if(gameState.keys['w']) {
+          const forward = camera.getTarget().subtract(camera.position);
+          forward.y = 0;
+          forward.normalize();
+          player.moveWithCollisions(forward.scale(speed));
+          moved = true;
+        }
+        if(gameState.keys['s']) {
+          const backward = camera.position.subtract(camera.getTarget());
+          backward.y = 0;
+          backward.normalize();
+          player.moveWithCollisions(backward.scale(speed));
+          moved = true;
+        }
+        if(gameState.keys['d']) {
+          const left = BABYLON.Vector3.Cross(camera.upVector, camera.getTarget().subtract(camera.position));
+          left.y = 0;
+          left.normalize();
+          player.moveWithCollisions(left.scale(speed));
+          moved = true;
+        }
+        if(gameState.keys['a']) {
+          const right = BABYLON.Vector3.Cross(camera.getTarget().subtract(camera.position), camera.upVector);
+          right.y = 0;
+          right.normalize();
+          player.moveWithCollisions(right.scale(speed));
+          moved = true;
+        }
+
+        // 카메라가 플레이어를 따라가도록 설정
+        if(moved) {
+          camera.setTarget(player.position);
+        }
+      }
+
+      // 입력 처리
+      document.addEventListener("keydown", (evt) => {
+        gameState.keys[evt.key.toLowerCase()] = true;
+      });
+
+      document.addEventListener("keyup", (evt) => {
+        gameState.keys[evt.key.toLowerCase()] = false;
+      });
+
+      // 마우스 이벤트 처리 수정
+      canvas.addEventListener("click", (evt) => {
+        // 좌클릭 발사
+        shoot(gameState.sniperMode);
+      });
+
+      canvas.addEventListener("contextmenu", (evt) => {
+        // 우클릭으로 저격모드 토글
+        evt.preventDefault();
+        gameState.sniperMode = !gameState.sniperMode;
+        
+        // 저격모드 시 줌인/줌아웃
+        if(gameState.sniperMode) {
+          camera.radius = 3; // 줌인
+        } else {
+          camera.radius = 5; // 기본 거리
+        }
+      });
+
+      // 포인터 락 (선택사항 - 더 부드러운 카메라 움직임을 위해)
+      canvas.addEventListener("click", () => {
+        canvas.requestPointerLock = canvas.requestPointerLock || canvas.mozRequestPointerLock;
+        if (canvas.requestPointerLock) {
+          canvas.requestPointerLock();
+        }
+      });
+
+      // 씬 생성 및 렌더링
+      createScene();
+
+      engine.runRenderLoop(() => {
+        updatePlayer();
+        updateBullets();
+        updateEnemies();
+        updateCrosshair(); // 십자선 위치 업데이트
+        
+        // 새 적 스폰
+        if(enemies.length < 3 && Math.random() < 0.01) {
+          spawnEnemies();
+        }
+
+        scene.render();
+      });
+
+      window.addEventListener("resize", () => engine.resize());
+    </script>
+  </body>
+</html>
