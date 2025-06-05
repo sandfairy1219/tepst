@@ -19,6 +19,7 @@
       <div>Health: <span id="health">100</span></div>
       <div>Mode: <span id="mode">Normal</span></div>
     </div>
+    <div id="coords" style="position:absolute;top:10px;left:200px;color:white;font-family:Arial;"></div>
     <div id="crosshair">+</div>
 
     <script>
@@ -26,9 +27,10 @@
       const engine = new BABYLON.Engine(canvas, true);
       let scene, camera, player;
       let enemies = [];
-      let bullets = [];
+      let bullets = []; 
       let score = 0;
       let health = 100;
+      let playerVelocityY = 0; // 점프 및 중력용
 
       // 게임 상태
       const gameState = {
@@ -37,6 +39,8 @@
         mouseY: 0,
         sniperMode: false
       };
+
+      // let isOnGround = false; // 중복 선언 제거
 
       function createScene() {
         scene = new BABYLON.Scene(engine);
@@ -48,9 +52,11 @@
         player.position = new BABYLON.Vector3(0, 0.5, 0);
         const playerMaterial = new BABYLON.StandardMaterial("playerMat", scene);
         playerMaterial.diffuseColor = new BABYLON.Color3(0, 0, 1);
+        playerMaterial.alpha = 0.5; // 반투명 처리
         player.material = playerMaterial;
         player.checkCollisions = true;
         player.ellipsoid = new BABYLON.Vector3(0.25, 0.5, 0.25);
+        player.isJumping = false; // 점프 상태
 
         // TPS 카메라 설정 (ArcRotateCamera 사용) - 수정
         camera = new BABYLON.ArcRotateCamera("camera", -Math.PI/2, Math.PI/2.5, 5, player.position, scene);
@@ -110,13 +116,13 @@
           const box = BABYLON.MeshBuilder.CreateBox(`obstacle${i}`, {width: 2, height: 2, depth: 2}, scene);
           box.position = new BABYLON.Vector3(
             Math.random() * 40 - 20,
-            1,
+            1, // 장애물 높이의 절반(2/2=1)로 설정해야 바닥 위에 정확히 놓임
             Math.random() * 40 - 20
           );
           const boxMaterial = new BABYLON.StandardMaterial(`obstacleMat${i}`, scene);
           boxMaterial.diffuseColor = new BABYLON.Color3(0.6, 0.3, 0.1);
           box.material = boxMaterial;
-          box.checkCollisions = true;
+          box.checkCollisions = true; // 충돌 활성화
         }
       }
 
@@ -128,11 +134,11 @@
             1,
             Math.random() * 40 - 20
           );
-          
           const enemyMaterial = new BABYLON.StandardMaterial(`enemyMat${i}`, scene);
           enemyMaterial.diffuseColor = new BABYLON.Color3(1, 0, 0);
           enemy.material = enemyMaterial;
-          
+          enemy.originalColor = enemyMaterial.diffuseColor.clone(); // 원래 색 저장
+
           enemy.health = 100;
           enemy.speed = 0.02;
           enemies.push(enemy);
@@ -141,24 +147,21 @@
 
       function shoot(isSniper = false) {
         const bullet = BABYLON.MeshBuilder.CreateSphere("bullet", {diameter: isSniper ? 0.05 : 0.1}, scene);
-        
-        // 플레이어 바로 위에서 총알 발사
-        bullet.position = player.position.clone();
-        bullet.position.y += 0.7; // 플레이어 위쪽에서 발사
-        
+
+        // 카메라 정중앙에서 총알 발사
+        const cameraForward = camera.getTarget().subtract(camera.position).normalize();
+        bullet.position = camera.position.add(cameraForward.scale(1)); // 카메라 앞 1만큼
+        bullet.position.y += 0.0; // 필요시 조정
+
         const bulletMaterial = new BABYLON.StandardMaterial("bulletMat", scene);
         bulletMaterial.diffuseColor = isSniper ? new BABYLON.Color3(0, 1, 1) : new BABYLON.Color3(1, 1, 0);
         bullet.material = bulletMaterial;
 
-        // 카메라가 바라보는 방향으로 총알 발사
-        const cameraDirection = camera.getTarget().subtract(camera.position).normalize();
-        bullet.direction = cameraDirection;
-        bullet.speed = isSniper ? 1.0 : 0.5; // 저격총은 더 빠름
-        bullet.life = isSniper ? 200 : 100; // 저격총은 더 긴 사거리
-        bullet.damage = isSniper ? 100 : 50; // 저격총은 더 강함
+        bullet.direction = cameraForward;
+        bullet.speed = isSniper ? 1.0 : 0.5;
+        bullet.life = isSniper ? 200 : 100;
+        bullet.damage = isSniper ? 100 : 50;
         bullet.isSniper = isSniper;
-        
-        // 중력 영향 제거 - 물리 효과 비활성화
         bullet.physicsImpostor = null;
 
         bullets.push(bullet);
@@ -167,22 +170,6 @@
       // 십자선을 캐릭터 바로 위에 고정
       function updateCrosshair() {
         const crosshair = document.getElementById('crosshair');
-        
-        // 플레이어 위쪽 위치 계산 (머리 위)
-        const playerHeadPos = player.position.add(new BABYLON.Vector3(0, 0.7, 0));
-        
-        // 플레이어 머리 위치를 화면 좌표로 변환
-        const playerScreenPos = BABYLON.Vector3.Project(
-          playerHeadPos,
-          BABYLON.Matrix.Identity(),
-          scene.getTransformMatrix(),
-          camera.viewport.toGlobal(engine.getRenderWidth(), engine.getRenderHeight())
-        );
-        
-        // 십자선을 플레이어 머리 위치로 고정
-        crosshair.style.left = playerScreenPos.x + 'px';
-        crosshair.style.top = playerScreenPos.y + 'px';
-        crosshair.style.transform = 'translate(-50%, -50%)';
         
         // 저격모드일 때 십자선 색상 변경
         if(gameState.sniperMode) {
@@ -210,6 +197,13 @@
           enemies.forEach((enemy, enemyIndex) => {
             if(enemy && BABYLON.Vector3.Distance(bullet.position, enemy.position) < 1) {
               enemy.health -= bullet.damage;
+              // 색을 연하게(밝게) 변경
+              let mat = enemy.material;
+              mat.diffuseColor = mat.diffuseColor.add(new BABYLON.Color3(0.3, 0.3, 0.3));
+              mat.diffuseColor.r = Math.min(mat.diffuseColor.r, 1);
+              mat.diffuseColor.g = Math.min(mat.diffuseColor.g, 1);
+              mat.diffuseColor.b = Math.min(mat.diffuseColor.b, 1);
+
               if(enemy.health <= 0) {
                 enemy.dispose();
                 enemies.splice(enemyIndex, 1);
@@ -257,10 +251,56 @@
         });
       }
 
+      let isOnGround = false; // 전역 변수
+
       function updatePlayer() {
         const speed = 0.1;
         let moved = false;
 
+        // 점프 및 중력 처리
+        playerVelocityY -= 0.015; // 중력 완화
+        player.moveWithCollisions(new BABYLON.Vector3(0, playerVelocityY, 0));
+
+        // 바닥 또는 장애물 위에 착지했는지 판별
+        let groundY = 0.5; // 기본 바닥 높이
+        let foundGround = false;
+
+        // 장애물 위 체크 (먼저 체크)
+        for (let i = 0; i < scene.meshes.length; i++) {
+          const mesh = scene.meshes[i];
+          if (mesh.name.startsWith("obstacle")) {
+            const topY = mesh.position.y + 1;
+            // xz 범위는 장애물 위, y는 장애물 상단과 근접
+            if (
+              Math.abs(player.position.x - mesh.position.x) < 1 &&
+              Math.abs(player.position.z - mesh.position.z) < 1 &&
+              Math.abs(player.position.y - topY) < 0.08 &&
+              playerVelocityY <= 0
+            ) {
+              foundGround = true;
+              groundY = topY;
+              break;
+            }
+          }
+        }
+
+        // 바닥 체크 (장애물 위가 아닐 때만)
+        if (!foundGround && Math.abs(player.position.y - 0.5) < 0.08 && playerVelocityY <= 0) {
+          foundGround = true;
+          groundY = 0.5;
+        }
+
+        // 오직 착지한 경우에만 y좌표를 고정
+        if (foundGround && playerVelocityY <= 0) {
+          player.position.y = groundY;
+          player.isJumping = false;
+          playerVelocityY = 0;
+          isOnGround = true;
+        } else {
+          isOnGround = false;
+        }
+
+        // 이동 코드 동일
         if(gameState.keys['w']) {
           const forward = camera.getTarget().subtract(camera.position);
           forward.y = 0;
@@ -290,7 +330,10 @@
           moved = true;
         }
 
-        // 카메라가 플레이어를 따라가도록 설정
+        // 좌표 표시
+        const coordsDiv = document.getElementById('coords');
+        coordsDiv.textContent = `X: ${player.position.x.toFixed(2)} Y: ${player.position.y.toFixed(2)} Z: ${player.position.z.toFixed(2)}`;
+
         if(moved) {
           camera.setTarget(player.position);
         }
@@ -299,6 +342,12 @@
       // 입력 처리
       document.addEventListener("keydown", (evt) => {
         gameState.keys[evt.key.toLowerCase()] = true;
+        // 스페이스바 점프
+        if(evt.key === " " && isOnGround) {
+          player.isJumping = true;
+          playerVelocityY = 0.38; // 점프 힘 (중력 약화에 맞춰 조정)
+          isOnGround = false;
+        }
       });
 
       document.addEventListener("keyup", (evt) => {
